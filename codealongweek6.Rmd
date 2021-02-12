@@ -1,0 +1,124 @@
+---
+title: 'Lab 6 Part 1: Spatial variograms & kriging'
+author: "Elmera Azadpour"
+date: "2/11/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(here)
+library(janitor)
+library(sf)
+library(tmap) # for interactive graph
+library(gstat) # for kriging
+library(stars) #grid for new location predictions
+```
+
+## lets read in our spatial data: depth to gw and california counties
+```{r}
+ca_dgw <- read_sf(here("ca_dgw"), layer = "F2013_DBGS_Points_20150720_093252") %>%  
+  clean_names() # measurements are in ft
+
+# check projection
+st_crs(ca_dgw) # "EPSG",4326
+
+ca_counties <- read_sf(here("ca_counties"), layer = "CA_Counties_TIGER2016") %>% 
+  clean_names() %>% 
+  select(name)
+
+# check projections of polygons
+st_crs(ca_counties) # "EPSG",3857
+# lets use st_transform to transform counties to match crs of dgw
+
+
+ca_counties <- st_transform(ca_counties, st_crs(ca_dgw)) # transformed
+
+st_crs(ca_counties) # great, now its "EPSG",4326 
+```
+
+## Now lets make some graphs & maps
+```{r}
+ggplot() +
+  geom_sf(data = ca_counties) +
+  geom_sf(data = ca_dgw, aes(color = dgbs))
+```
+
+## lets make interactive map
+```{r}
+tmap_mode("view")
+
+tm_shape(ca_dgw) + 
+  tm_dots("dgbs")
+
+```
+
+## lets isolate to San Joaquin county
+```{r}
+sj_county <- ca_counties %>% 
+  filter(name == "San Joaquin")
+
+## find intersection from dgw and outline of sj county
+sj_depth <- ca_dgw %>% 
+  st_intersection(sj_county)
+
+plot(sj_depth)
+plot(sj_county)
+
+
+ggplot() +
+  geom_sf(data = sj_county) +
+  geom_sf(data = sj_depth, aes(color = dgbs))
+```
+
+## Check for duplicates, you could remove, take mean value
+- first lets find the duplicates! 
+```{r}
+well_duplicates <- sj_depth %>% 
+  get_dupes(latitude, longitude) ## 2 points, pairs of locations where there is duplicates
+
+# we will just remove
+sj_depth <- sj_depth %>% 
+  filter(!local_well %in% well_duplicates$local_well)
+
+sj_depth %>% 
+  get_dupes(latitude, longitude)
+```
+
+## lets create a vereogram
+- a model that describes the correlation between observation in space basd on how far apart they are
+- this gives us information on weight
+- then make a new grid
+- apply spacial kreiging 
+```{r}
+## creating variogram
+sj_dgw_vgm <- variogram(dgbs ~ 1, data = sj_depth)
+
+plot(sj_dgw_vgm) 
+# as distance between observations increases, the increase in semivariance (aka there is a decrease in the correlation between values of those observations) 
+
+sj_dgw_vgm_fit <- fit.variogram(sj_dgw_vgm, model = vgm(nugget = 20, psill = 3000, range = 30, model = "Gau"))
+
+sj_dgw_vgm_fit
+
+plot(sj_dgw_vgm, sj_dgw_vgm_fit) #overall seems to do a good job
+
+```
+## lets do some spatial kriging (interpolation)
+```{r}
+# make a grid that only contains an area that is relvaent over SJ county 
+sj_grid <- st_bbox(sj_county) %>% 
+  st_as_stars(dx = 0.001, dy = 0.001) %>% 
+  st_set_crs(4326) %>% 
+  st_crop(sj_county)
+
+plot(sj_grid)
+```
+## now lets make predicts 
+```{r}
+sj_dgw_krige <- krige(dgbs ~ 1, sj_depth, sj_grid, model = sj_dgw_vgm_fit)
+
+plot(sj_dgw_krige)
+```
+
